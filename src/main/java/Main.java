@@ -16,8 +16,8 @@ public class Main {
     private static final boolean BIG_ENDIAN = false;
     // 文本文件，作为OBS的输入
     private static final String SUBTITLE_FILE = "subtitles.txt";
-    private static final String TENCENT_SECRET_ID = "";
-    private static final String TENCENT_SECRET_KEY = "";
+    private static final String TENCENT_SECRET_ID = "AKIDFKhspibP0NYUCgv263ngLn37yax5yd3D";
+    private static final String TENCENT_SECRET_KEY = "zjEUVHtJgqqeiZCZhZCZhaFfrqb8RWMy";
     private static AsrClient asrClient;
     
     public static void main(String[] args) {

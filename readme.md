@@ -40,5 +40,3 @@ OBS Studio 是一个非常适合的工具，可以用以下方法展示字幕：
 4.	OBS 配置：
     在 OBS 中，设置文本来源读取 subtitles.txt，实时显示内容。
 
-private static final String TENCENT_SECRET_ID = "AKIDFKhspibP0NYUCgv263ngLn37yax5yd3D";
-private static final String TENCENT_SECRET_KEY = "zjEUVHtJgqqeiZCZhZCZhaFfrqb8RWMy";
