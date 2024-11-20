@@ -1,31 +1,29 @@
-// 引入相关库和SDK
-import com.tencentcloudapi.asr.v20190614.AsrClient;
-import com.tencentcloudapi.asr.v20190614.models.*;
-import com.xfyun.client.TtsClient;
-import org.json.JSONArray;
-import org.json.JSONObject;
-
-import java.security.MessageDigest; // 确保导入路径正确
-import java.util.HashMap;
-import java.util.Map;
-
 import javax.sound.sampled.*;
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
+import java.io.*;
+import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import com.tencentcloudapi.asr.v20190614.*;
+import com.tencentcloudapi.asr.v20190614.models.*;
+import com.tencentcloudapi.common.Credential;
+import com.tencentcloudapi.common.profile.ClientProfile;
+import com.tencentcloudapi.common.profile.HttpProfile;
 
 public class Main {
-    private static final float SAMPLE_RATE = 16000;
+    private static final float SAMPLE_RATE = 48000.0f;
     private static final int SAMPLE_SIZE_IN_BITS = 16;
-    private static final int CHANNELS = 1;
+    private static final int CHANNELS = 2;
     private static final boolean SIGNED = true;
     private static final boolean BIG_ENDIAN = false;
+    // 文本文件，作为OBS的输入
+    private static final String SUBTITLE_FILE = "subtitles.txt";
+    private static final String TENCENT_SECRET_ID = "AKIDFKhspibP0NYUCgv263ngLn37yax5yd3D";
+    private static final String TENCENT_SECRET_KEY = "zjEUVHtJgqqeiZCZhZCZhaFfrqb8RWMy";
+    private static AsrClient asrClient;
     
     public static void main(String[] args) {
-        // 1. 初始化腾讯语音识别客户端
-        AsrClient asrClient = new AsrClient("your-secret-id", "your-secret-key"); // todo
-
+        // 初始化腾讯云语音识别客户端
+        initAsrClient();
+        
         // 设置音频格式
         AudioFormat format = new AudioFormat(
             SAMPLE_RATE,
@@ -35,33 +33,16 @@ public class Main {
             BIG_ENDIAN
         );
 
-        // 设置数据行信息
         DataLine.Info targetInfo = new DataLine.Info(
             TargetDataLine.class,
             format
         );
 
         try {
-            // 获取所有可用的混音器
-            Mixer.Info[] mixerInfos = AudioSystem.getMixerInfo();
-            TargetDataLine targetLine = null;
-
-            // 查找 VB-Audio Virtual Cable
-            for (Mixer.Info mixerInfo : mixerInfos) {
-                System.out.println("发现音频设备: " + mixerInfo.getName());
-                if (mixerInfo.getName().contains("CABLE Output")) {
-                    Mixer mixer = AudioSystem.getMixer(mixerInfo);
-                    try {
-                        targetLine = (TargetDataLine) mixer.getLine(targetInfo);
-                        break;
-                    } catch (Exception e) {
-                        System.err.println("无法获取该设备的数据线: " + e.getMessage());
-                    }
-                }
-            }
-
+            // 查找 BlackHole 设备
+            TargetDataLine targetLine = findVirtualCableDevice(targetInfo);
             if (targetLine == null) {
-                throw new RuntimeException("未找到 VB-Audio Virtual Cable 设备");
+                throw new RuntimeException("未找到 BlackHole 设备");
             }
 
             // 打开并启动数据线
@@ -69,46 +50,11 @@ public class Main {
             targetLine.start();
 
             // 创建音频捕获线程
-            TargetDataLine finalTargetLine = targetLine;
-            Thread captureThread = new Thread(() -> {
-                byte[] buffer = new byte[4096];
-                ByteArrayOutputStream audioData = new ByteArrayOutputStream();
-                boolean running = true;
-
-                while (running) {
-                    int count = finalTargetLine.read(buffer, 0, buffer.length);
-                    if (count > 0) {
-                        // 将捕获的音频数据添加到缓冲区
-                        audioData.write(buffer, 0, count);
-
-                        // 当累积了足够的数据时（例如，1秒的音频）
-                        if (audioData.size() >= SAMPLE_RATE * 2) { // 16位=2字节
-                            byte[] audioChunk = audioData.toByteArray();
-                            // 重置缓冲区
-                            audioData.reset();
-
-                            // 发送音频数据到语音识别服务
-                            try {
-                                String cantoneseText = recognizeSpeech(audioChunk);
-                                if (cantoneseText != null && !cantoneseText.isEmpty()) {
-                                    // 翻译并播放
-                                    String mandarinText = translateCantoneseToMandarin(cantoneseText);
-                                    byte[] synthesizedAudio = synthesizeSpeech(mandarinText);
-                                    playAudio(synthesizedAudio);
-                                }
-                            } catch (Exception e) {
-                                System.err.println("处理音频时出错: " + e.getMessage());
-                            }
-                        }
-                    }
-                }
-            });
-
-            // 启动捕获线程
+            Thread captureThread = new Thread(() -> captureAudio(targetLine));
             captureThread.start();
 
             // 等待用户输入以停止程序
-            System.out.println("按回车键停止程序...");
+            System.out.println("程序已启动，按回车键停止...");
             System.in.read();
 
             // 清理资源
@@ -121,126 +67,221 @@ public class Main {
         }
     }
 
-    // 语音识别方法
-    private static String recognizeSpeech(byte[] audioData) {
-        // 使用腾讯云语音识别API
-        try {
-            // 配置请求
-            SentenceRecognitionRequest req = new SentenceRecognitionRequest();
-            req.setProjectId(0);
-            req.setSubServiceType(2); // 粤语识别
-            req.setEngSerViceType("16k_zh");
-            req.setVoiceFormat("wav");
-            req.setSourceType(1);
-            req.setVoiceData(Base64.getEncoder().encodeToString(audioData));
 
-            // 发送请求
-            SentenceRecognitionResponse response = asrClient.SentenceRecognition(req);
-            return response.getResult();
+    private static void initAsrClient() {
+        try {
+            Credential cred = new Credential(TENCENT_SECRET_ID, TENCENT_SECRET_KEY);
+            HttpProfile httpProfile = new HttpProfile();
+            httpProfile.setEndpoint("asr.tencentcloudapi.com");
+            ClientProfile clientProfile = new ClientProfile();
+            clientProfile.setHttpProfile(httpProfile);
+            asrClient = new AsrClient(cred, "ap-guangzhou", clientProfile);
+        } catch (Exception e) {
+            System.err.println("初始化语音识别客户端失败: " + e.getMessage());
+            System.exit(1);
+        }
+    }
+
+    private static TargetDataLine findVirtualCableDevice(DataLine.Info targetInfo) {
+        Mixer.Info[] mixerInfos = AudioSystem.getMixerInfo();
+        System.out.println("\n=== 可用音频设备列表及其支持的格式 ===");
+        
+        for (Mixer.Info mixerInfo : mixerInfos) {
+            System.out.println("\n设备名称: " + mixerInfo.getName());
+            System.out.println("设备描述: " + mixerInfo.getDescription());
+            
+            try {
+                Mixer mixer = AudioSystem.getMixer(mixerInfo);
+                Line.Info[] lineInfos = mixer.getTargetLineInfo();
+                
+                // 打印该设备支持的格式
+                for (Line.Info lineInfo : lineInfos) {
+                    if (lineInfo instanceof DataLine.Info) {
+                        AudioFormat[] formats = ((DataLine.Info) lineInfo).getFormats();
+                        System.out.println("支持的格式:");
+                        for (AudioFormat format : formats) {
+                            System.out.println("  " + format.toString());
+                        }
+                    }
+                }
+                
+                // BlackHole 设备匹配
+                String deviceName = mixerInfo.getName().toLowerCase();
+                if (deviceName.contains("blackhole")) {
+                    System.out.println("\n找到匹配设备: " + mixerInfo.getName());
+                    
+                    // 尝试不同的音频格式
+                    AudioFormat[] formatsToTry = {
+                        // 尝试不同的格式组合
+                        new AudioFormat(48000, 32, 2, true, true),  // 大端序
+                        new AudioFormat(48000, 32, 2, true, false), // 小端序
+                        new AudioFormat(48000, 16, 2, true, false), // 16位
+                        new AudioFormat(44100, 16, 2, true, false), // 44.1kHz
+                        new AudioFormat(44100, 32, 2, true, false)  // 44.1kHz, 32位
+                    };
+                    
+                    for (AudioFormat format : formatsToTry) {
+                        try {
+                            DataLine.Info info = new DataLine.Info(TargetDataLine.class, format);
+                            if (AudioSystem.isLineSupported(info)) {
+                                System.out.println("支持的格式: " + format);
+                                TargetDataLine line = (TargetDataLine) mixer.getLine(info);
+                                return line;
+                            }
+                        } catch (Exception e) {
+                            System.out.println("格式不支持: " + format);
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                System.err.println("尝试获取设备 " + mixerInfo.getName() + " 失败: " + e.getMessage());
+            }
+        }
+        
+        return null;
+    }
+
+    private static void captureAudio(TargetDataLine targetLine) {
+        byte[] buffer = new byte[4096];
+        ByteArrayOutputStream audioData = new ByteArrayOutputStream();
+        int sampleCount = 0;
+        
+        while (true) {
+            int count = targetLine.read(buffer, 0, buffer.length);
+            if (count > 0) {
+                audioData.write(buffer, 0, count);
+                sampleCount += count / (2 * CHANNELS); // 16位 = 2字节
+
+                // 累积约1秒的音频数据后进行识别
+                if (sampleCount >= SAMPLE_RATE) {
+                    byte[] audioChunk = audioData.toByteArray();
+                    byte[] convertedAudio = convertAudioFormat(audioChunk);
+                    
+                    // 调试：保存音频文件
+                    if (convertedAudio != null) {
+                        saveAudioToFile(convertedAudio, "debug_audio.wav");
+                    }
+                    
+                    audioData.reset();
+                    sampleCount = 0;
+
+                    if (convertedAudio != null) {
+                        try {
+                            String recognizedText = recognizeSpeech(convertedAudio);
+                            if (recognizedText != null && !recognizedText.isEmpty()) {
+                                System.out.println("识别结果: " + recognizedText);
+                                updateSubtitleFile(recognizedText);
+                            }
+                        } catch (Exception e) {
+                            System.err.println("处理音频时出错: " + e.getMessage());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private static String recognizeSpeech(byte[] audioData) {
+        try {
+            // 配置语音识别请求
+            SentenceRecognitionRequest req = new SentenceRecognitionRequest();
+            req.setProjectId(0L);
+            req.setSubServiceType(2L); // 粤语识别
+            req.setEngSerViceType("16k_zh");
+            req.setVoiceFormat("wav");  // 指定格式为 wav
+            req.setSourceType(1L);
+            req.setData(Base64.getEncoder().encodeToString(audioData));
+
+            // 发送请求并获取结果
+            SentenceRecognitionResponse resp = asrClient.SentenceRecognition(req);
+            return resp.getResult();
         } catch (Exception e) {
             System.err.println("语音识别错误: " + e.getMessage());
+            e.printStackTrace();
             return null;
         }
     }
 
-    // 语音合成方法
-    private static byte[] synthesizeSpeech(String text) {
-        try {
-            return ttsClient.synthesize(text, "xiaoyan");
-        } catch (Exception e) {
-            System.err.println("语音合成错误: " + e.getMessage());
-            return null;
+    private static void updateSubtitleFile(String text) {
+        try (BufferedWriter writer = new BufferedWriter(
+                new OutputStreamWriter(
+                    new FileOutputStream(SUBTITLE_FILE), 
+                    StandardCharsets.UTF_8))) {
+            writer.write(text);
+        } catch (IOException e) {
+            System.err.println("更新字幕文件失败: " + e.getMessage());
         }
     }
 
-    private static String translateCantoneseToMandarin(String cantoneseText) {
-        // 腾讯云翻译API的配置
-        final String SECRET_ID = "你的SECRET_ID";  //todo
-        final String SECRET_KEY = "你的SECRET_KEY"; // todo
-        final String TRANS_API_HOST = "https://tmt.tencentcloudapi.com";
-
+    private static byte[] convertAudioFormat(byte[] sourceAudio) {
         try {
-            // 准备请求参数
-            String salt = String.valueOf(System.currentTimeMillis());
-            // 生成签名
-            String src = SECRET_ID + cantoneseText + salt + SECRET_KEY;
-            String sign = MD5.md5(src);
-
-            // 构建请求参数
-            Map<String, String> params = new HashMap<>();
-            params.put("q", cantoneseText);
-            params.put("from", "yue");     // 粤语
-            params.put("to", "zh");        // 普通话
-            params.put("appid", SECRET_ID);
-            params.put("salt", salt);
-            params.put("sign", sign);
-
-            // 发送HTTP请求
-            String result = HttpUtil.post(TRANS_API_HOST, params);
-
-            // 解析JSON响应
-            JSONObject jsonObject = new JSONObject(result);
-            JSONArray transResult = jsonObject.getJSONArray("trans_result");
-            if (transResult != null && !transResult.isEmpty()) {
-                return transResult.getJSONObject(0).getString("dst");
-            }
-
-            return cantoneseText; // 如果翻译失败，返回原文
-
-        } catch (Exception e) {
-            System.err.println("翻译过程出现错误: " + e.getMessage());
-            return cantoneseText; // 发生错误时返回原文
-        }
-    }
-
-    // MD5工具类
-    private static class MD5 {
-        public static String md5(String string) {
-            try {
-                MessageDigest md = MessageDigest.getInstance("MD5");
-                byte[] bytes = md.digest(string.getBytes("UTF-8"));
-                return toHex(bytes);
-            } catch (Exception e) {
-                throw new RuntimeException(e);
-            }
-        }
-
-        private static String toHex(byte[] bytes) {
-            StringBuilder hex = new StringBuilder();
-            for (byte b : bytes) {
-                hex.append(String.format("%02x", b));
-            }
-            return hex.toString();
-        }
-    }
-
-    private static void playAudio(byte[] audio) {
-        try {
-            // 创建音频输入流
-            AudioInputStream audioInputStream = new AudioInputStream(
-                new ByteArrayInputStream(audio),
-                new AudioFormat(16000, 16, 1, true, false),
-                audio.length
+            // 创建源音频格式（48kHz，16位，立体声）
+            AudioFormat sourceFormat = new AudioFormat(
+                48000.0f,
+                16,
+                2,
+                true,
+                false
             );
+            
+            // 创建目标音频格式（16kHz，16位，单声道）
+            AudioFormat targetFormat = new AudioFormat(
+                16000.0f,
+                16,
+                1,
+                true,
+                false
+            );
+            
+            // 计算音频帧数
+            long frameLength = sourceAudio.length / sourceFormat.getFrameSize();
+            
+            // 创建音频输入流
+            AudioInputStream sourceStream = new AudioInputStream(
+                new ByteArrayInputStream(sourceAudio),
+                sourceFormat,
+                frameLength
+            );
+            
+            // 转换音频格式
+            AudioInputStream convertedStream = AudioSystem.getAudioInputStream(targetFormat, sourceStream);
+            
+            // 计算转换后的帧数
+            long convertedFrameLength = (long) (frameLength * targetFormat.getSampleRate() / sourceFormat.getSampleRate());
+            
+            // 创建一个新的音频输入流，指定帧长度
+            AudioInputStream lengthSpecifiedStream = new AudioInputStream(
+                convertedStream,
+                targetFormat,
+                convertedFrameLength
+            );
+            
+            // 写入 WAV 格式
+            ByteArrayOutputStream wavStream = new ByteArrayOutputStream();
+            AudioSystem.write(lengthSpecifiedStream, AudioFileFormat.Type.WAVE, wavStream);
+            
+            // 调试信息
+            byte[] result = wavStream.toByteArray();
+            System.out.println("转换前音频大小: " + sourceAudio.length + " 字节");
+            System.out.println("转换后音频大小: " + result.length + " 字节");
+            
+            return result;
+        } catch (Exception e) {
+            System.err.println("音频格式转换失败: " + e.getMessage());
+            e.printStackTrace();
+            return null;
+        }
+    }
 
-            // 获取音频剪辑
-            DataLine.Info info = new DataLine.Info(Clip.class, audioInputStream.getFormat());
-            Clip clip = (Clip) AudioSystem.getLine(info);
-
-            // 打开音频剪辑并开始播放
-            clip.open(audioInputStream);
-            clip.start();
-
-            // 等待音频播放完成
-            while (!clip.isRunning())
-                Thread.sleep(10);
-            while (clip.isRunning())
-                Thread.sleep(10);
-
-            // 关闭音频剪辑
-            clip.close();
-        } catch (LineUnavailableException | IOException  | InterruptedException e) {
-            System.err.println("播放音频时出现错误: " + e.getMessage());
+    // 为了便于调试，添加音频保存功能
+    private static void saveAudioToFile(byte[] audioData, String filename) {
+        try {
+            try (FileOutputStream fos = new FileOutputStream(filename)) {
+                fos.write(audioData);
+            }
+            System.out.println("音频已保存到文件: " + filename);
+        } catch (IOException e) {
+            System.err.println("保存音频文件失败: " + e.getMessage());
         }
     }
 }

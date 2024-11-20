@@ -16,12 +16,8 @@
             <version>3.1.1061</version>
         </dependency>
 
-        <!-- 讯飞 TTS SDK -->
-        <dependency>
-            <groupId>com.iflytek.sdk</groupId>
-            <artifactId>tts</artifactId>
-            <version>latest</version>
-        </dependency>
+        <!-- https://mvnrepository.com/artifact/com.tencentcloudapi/tencentcloud-speech-sdk-java -->
+
 
         <!-- JSON处理 -->
         <dependency>
@@ -36,6 +32,7 @@
             <artifactId>slf4j-api</artifactId>
             <version>1.7.32</version>
         </dependency>
+
     </dependencies>
 
     <properties>
