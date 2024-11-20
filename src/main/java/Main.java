@@ -16,9 +16,13 @@ public class Main {
     private static final boolean BIG_ENDIAN = false;
     // 文本文件，作为OBS的输入
     private static final String SUBTITLE_FILE = "subtitles.txt";
-    private static final String TENCENT_SECRET_ID = "AKIDFKhspibP0NYUCgv263ngLn37yax5yd3D";
-    private static final String TENCENT_SECRET_KEY = "zjEUVHtJgqqeiZCZhZCZhaFfrqb8RWMy";
+    private static final String TENCENT_SECRET_ID = "";
+    private static final String TENCENT_SECRET_KEY = "";
     private static AsrClient asrClient;
+    
+    // 调整缓冲区大小和采样时间
+    private static final int BUFFER_SIZE = 2048;  // 减小缓冲区
+    private static final float CAPTURE_SECONDS = 0.5f;  // 减少采样时间到0.5秒
     
     public static void main(String[] args) {
         // 初始化腾讯云语音识别客户端
@@ -62,8 +66,7 @@ public class Main {
             targetLine.close();
 
         } catch (Exception e) {
-            System.err.println("音频捕获错误: " + e.getMessage());
-            e.printStackTrace();
+            System.err.println("程序错误: " + e.getMessage());
         }
     }
 
@@ -142,40 +145,38 @@ public class Main {
     }
 
     private static void captureAudio(TargetDataLine targetLine) {
-        byte[] buffer = new byte[4096];
+        byte[] buffer = new byte[BUFFER_SIZE];
         ByteArrayOutputStream audioData = new ByteArrayOutputStream();
         int sampleCount = 0;
+        
+        System.out.println("开始录音识别...");
         
         while (true) {
             int count = targetLine.read(buffer, 0, buffer.length);
             if (count > 0) {
                 audioData.write(buffer, 0, count);
-                sampleCount += count / (2 * CHANNELS); // 16位 = 2字节
+                sampleCount += count / (2 * CHANNELS);
 
-                // 累积约1秒的音频数据后进行识别
-                if (sampleCount >= SAMPLE_RATE) {
+                if (sampleCount >= SAMPLE_RATE * CAPTURE_SECONDS) {
                     byte[] audioChunk = audioData.toByteArray();
-                    byte[] convertedAudio = convertAudioFormat(audioChunk);
                     
-                    // 调试：保存音频文件
-                    if (convertedAudio != null) {
-                        saveAudioToFile(convertedAudio, "debug_audio.wav");
-                    }
+                    new Thread(() -> {
+                        byte[] convertedAudio = convertAudioFormat(audioChunk);
+                        if (convertedAudio != null) {
+                            try {
+                                String recognizedText = recognizeSpeech(convertedAudio);
+                                if (recognizedText != null && !recognizedText.isEmpty()) {
+                                    System.out.println("[识别结果] " + recognizedText);
+                                    updateSubtitleFile(recognizedText);
+                                }
+                            } catch (Exception e) {
+                                System.err.println("识别错误: " + e.getMessage());
+                            }
+                        }
+                    }).start();
                     
                     audioData.reset();
                     sampleCount = 0;
-
-                    if (convertedAudio != null) {
-                        try {
-                            String recognizedText = recognizeSpeech(convertedAudio);
-                            if (recognizedText != null && !recognizedText.isEmpty()) {
-                                System.out.println("识别结果: " + recognizedText);
-                                updateSubtitleFile(recognizedText);
-                            }
-                        } catch (Exception e) {
-                            System.err.println("处理音频时出错: " + e.getMessage());
-                        }
-                    }
                 }
             }
         }
@@ -183,92 +184,60 @@ public class Main {
 
     private static String recognizeSpeech(byte[] audioData) {
         try {
-            // 配置语音识别请求
             SentenceRecognitionRequest req = new SentenceRecognitionRequest();
             req.setProjectId(0L);
-            req.setSubServiceType(2L); // 粤语识别
+            req.setSubServiceType(2L);
             req.setEngSerViceType("16k_zh");
-            req.setVoiceFormat("wav");  // 指定格式为 wav
+            req.setVoiceFormat("wav");
             req.setSourceType(1L);
             req.setData(Base64.getEncoder().encodeToString(audioData));
 
-            // 发送请求并获取结果
+            HttpProfile httpProfile = new HttpProfile();
+            httpProfile.setConnTimeout(1000);
+            httpProfile.setReadTimeout(2000);
+            
             SentenceRecognitionResponse resp = asrClient.SentenceRecognition(req);
             return resp.getResult();
         } catch (Exception e) {
-            System.err.println("语音识别错误: " + e.getMessage());
-            e.printStackTrace();
+            System.err.println("API调用错误: " + e.getMessage());
             return null;
         }
     }
 
     private static void updateSubtitleFile(String text) {
-        try (BufferedWriter writer = new BufferedWriter(
-                new OutputStreamWriter(
-                    new FileOutputStream(SUBTITLE_FILE), 
-                    StandardCharsets.UTF_8))) {
+        try (FileWriter writer = new FileWriter(SUBTITLE_FILE, false)) {
             writer.write(text);
+            writer.flush();
         } catch (IOException e) {
-            System.err.println("更新字幕文件失败: " + e.getMessage());
+            System.err.println("文件写入错误: " + e.getMessage());
         }
     }
 
     private static byte[] convertAudioFormat(byte[] sourceAudio) {
         try {
-            // 创建源音频格式（48kHz，16位，立体声）
-            AudioFormat sourceFormat = new AudioFormat(
-                48000.0f,
-                16,
-                2,
-                true,
-                false
-            );
+            AudioFormat sourceFormat = new AudioFormat(48000.0f, 16, 2, true, false);
+            AudioFormat targetFormat = new AudioFormat(16000.0f, 16, 1, true, false);
             
-            // 创建目标音频格式（16kHz，16位，单声道）
-            AudioFormat targetFormat = new AudioFormat(
-                16000.0f,
-                16,
-                1,
-                true,
-                false
-            );
-            
-            // 计算音频帧数
             long frameLength = sourceAudio.length / sourceFormat.getFrameSize();
-            
-            // 创建音频输入流
             AudioInputStream sourceStream = new AudioInputStream(
                 new ByteArrayInputStream(sourceAudio),
                 sourceFormat,
                 frameLength
             );
             
-            // 转换音频格式
             AudioInputStream convertedStream = AudioSystem.getAudioInputStream(targetFormat, sourceStream);
-            
-            // 计算转换后的帧数
             long convertedFrameLength = (long) (frameLength * targetFormat.getSampleRate() / sourceFormat.getSampleRate());
             
-            // 创建一个新的音频输入流，指定帧长度
-            AudioInputStream lengthSpecifiedStream = new AudioInputStream(
-                convertedStream,
-                targetFormat,
-                convertedFrameLength
-            );
+            int estimatedBytes = (int) (convertedFrameLength * targetFormat.getFrameSize());
+            ByteArrayOutputStream wavStream = new ByteArrayOutputStream(estimatedBytes + 44);
             
-            // 写入 WAV 格式
-            ByteArrayOutputStream wavStream = new ByteArrayOutputStream();
-            AudioSystem.write(lengthSpecifiedStream, AudioFileFormat.Type.WAVE, wavStream);
+            AudioSystem.write(new AudioInputStream(convertedStream, targetFormat, convertedFrameLength),
+                            AudioFileFormat.Type.WAVE,
+                            wavStream);
             
-            // 调试信息
-            byte[] result = wavStream.toByteArray();
-            System.out.println("转换前音频大小: " + sourceAudio.length + " 字节");
-            System.out.println("转换后音频大小: " + result.length + " 字节");
-            
-            return result;
+            return wavStream.toByteArray();
         } catch (Exception e) {
-            System.err.println("音频格式转换失败: " + e.getMessage());
-            e.printStackTrace();
+            System.err.println("音频转换错误: " + e.getMessage());
             return null;
         }
     }
